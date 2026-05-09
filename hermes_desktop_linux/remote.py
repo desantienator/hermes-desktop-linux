@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, subprocess
+import json, os, subprocess
 from .models import ConnectionProfile, RemoteResult, now_ms
 
 REMOTE_SCRIPT = r'''
@@ -63,12 +63,17 @@ def list_skills():
 
 def cron_jobs():
     try:
-        cp=subprocess.run(['hermes','cron','list','--json'], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
-        if cp.returncode==0:
-            return json.loads(cp.stdout)
-        return {'error': cp.stderr or cp.stdout}
+        cp=subprocess.run(['hermes','cron','list','--all'], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        text = cp.stdout or cp.stderr
+        jobs=[]
+        for line in text.splitlines():
+            stripped=line.strip()
+            if not stripped or stripped.startswith(('ID', '─', '━')):
+                continue
+            jobs.append({'name': stripped, 'raw': stripped})
+        return {'ok': cp.returncode == 0, 'raw': text, 'jobs': jobs, 'error': '' if cp.returncode == 0 else text}
     except Exception as e:
-        return {'error': str(e)}
+        return {'ok': False, 'raw': '', 'jobs': [], 'error': str(e)}
 
 def table_columns(con, table):
     if not VALID_TABLE.match(table):
@@ -81,6 +86,17 @@ def table_rows(con, table, limit):
     return [dict(r) for r in con.execute(f'select * from {table} limit {int(limit)}')]
 
 def kanban():
+    try:
+        cp=subprocess.run(['hermes','kanban','list','--json'], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        if cp.returncode == 0:
+            parsed=json.loads(cp.stdout)
+            if isinstance(parsed, list):
+                return {'boards': [], 'tasks': parsed, 'source': 'hermes kanban list --json'}
+            if isinstance(parsed, dict):
+                parsed.setdefault('source', 'hermes kanban list --json')
+                return parsed
+    except Exception:
+        pass
     db=os.path.join(home,'kanban.db')
     if not os.path.exists(db): return {'boards': [], 'tasks': [], 'path': db, 'error':'kanban.db not found'}
     con=sqlite3.connect(db); con.row_factory=sqlite3.Row
@@ -154,12 +170,13 @@ class SSHClient:
         else:
             port = [] if self.profile.ssh_alias else ["-p", str(self.profile.port)]
             cmd = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", *port, self.profile.target, "python3", "-c", REMOTE_SCRIPT]
-        env = {
+        env = os.environ.copy()
+        env.update({
             "HERMES_HOME": self.profile.hermes_home,
             "HD_ACTION": action,
             "HD_ARG": arg,
             "HD_PAYLOAD": json.dumps(payload or {}),
-        }
+        })
         try:
             cp = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env)
             elapsed = now_ms() - start
