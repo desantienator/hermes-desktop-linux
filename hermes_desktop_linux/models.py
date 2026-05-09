@@ -40,6 +40,7 @@ class ProfileStore:
 
     def save(self, profiles: list[ConnectionProfile]) -> None:
         self.path.write_text(json.dumps([asdict(p) for p in profiles], indent=2))
+        os.chmod(self.path, 0o600)
 
 @dataclass
 class RemoteResult:

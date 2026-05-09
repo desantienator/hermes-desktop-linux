@@ -15,6 +15,7 @@ class CoreTests(unittest.TestCase):
             loaded = store.load()
             self.assertEqual(loaded, profiles)
             self.assertEqual(json.loads(path.read_text())[0]['name'], 'bob')
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_local_overview_runs(self):
         client = SSHClient(ConnectionProfile(name='local', host='localhost'))
@@ -30,6 +31,17 @@ class CoreTests(unittest.TestCase):
             res = client.run_action('files', d)
             self.assertTrue(res.ok, res.error)
             self.assertTrue(any(item['name'] == 'x.txt' for item in res.data))
+
+    def test_write_is_limited_to_hermes_home(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as outside:
+            client = SSHClient(ConnectionProfile(name='local', host='localhost', hermes_home=home))
+            good = Path(home) / 'note.txt'
+            res = client.run_action('write', str(good), {'content': 'safe'})
+            self.assertTrue(res.ok, res.error)
+            self.assertEqual(good.read_text(), 'safe')
+            bad = client.run_action('write', str(Path(outside) / 'nope.txt'), {'content': 'bad'})
+            self.assertFalse(bad.ok)
+            self.assertIn('writes are limited', bad.error)
 
 if __name__ == '__main__':
     unittest.main()

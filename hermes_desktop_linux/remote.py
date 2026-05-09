@@ -1,41 +1,50 @@
 from __future__ import annotations
-import json, shlex, subprocess, textwrap
+import json, subprocess
 from .models import ConnectionProfile, RemoteResult, now_ms
 
 REMOTE_SCRIPT = r'''
-import json, os, sqlite3, glob, pathlib, subprocess, sys, time
+import json, os, sqlite3, glob, subprocess, sys, shutil, re, tempfile
 home = os.path.expanduser(os.environ.get('HERMES_HOME', '~/.hermes'))
+home_real = os.path.realpath(home)
 
-def safe_read(path, limit=200000):
+VALID_TABLE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+def safe_read(path, limit=1000000):
     try:
         with open(os.path.expanduser(path), 'r', encoding='utf-8', errors='replace') as f:
             return f.read(limit)
-    except Exception as e:
+    except Exception:
         return None
 
 def list_sessions():
     roots=[os.path.join(home,'sessions'), os.path.join(home,'logs'), home]
-    rows=[]
+    matches=[]
     for root in roots:
         for pat in ('**/*.jsonl','**/*.json','**/*.md','**/*.txt'):
-            for p in glob.glob(os.path.join(root,pat), recursive=True)[:2000]:
-                try:
-                    st=os.stat(p)
-                    if st.st_size == 0: continue
-                    rows.append({'path':p,'name':os.path.basename(p),'size':st.st_size,'mtime':st.st_mtime})
-                except OSError: pass
-    rows=sorted({r['path']:r for r in rows}.values(), key=lambda r:r['mtime'], reverse=True)[:300]
-    return rows
+            matches.extend(glob.glob(os.path.join(root,pat), recursive=True))
+    rows=[]
+    for p in sorted(set(matches)):
+        try:
+            st=os.stat(p)
+            if st.st_size == 0: continue
+            rows.append({'path':p,'name':os.path.basename(p),'size':st.st_size,'mtime':st.st_mtime})
+        except OSError:
+            pass
+    return sorted(rows, key=lambda r:r['mtime'], reverse=True)[:300]
 
 def list_files(base=None):
     base=os.path.expanduser(base or home)
+    names=sorted(os.listdir(base))
     out=[]
-    for name in sorted(os.listdir(base))[:500]:
+    for name in names[:500]:
         p=os.path.join(base,name)
         try:
             st=os.stat(p)
             out.append({'name':name,'path':p,'is_dir':os.path.isdir(p),'size':st.st_size,'mtime':st.st_mtime})
-        except OSError: pass
+        except OSError:
+            pass
+    if len(names) > 500:
+        out.append({'name':'… truncated after 500 entries','path':base,'is_dir':False,'size':0,'mtime':0})
     return out
 
 def list_skills():
@@ -61,6 +70,16 @@ def cron_jobs():
     except Exception as e:
         return {'error': str(e)}
 
+def table_columns(con, table):
+    if not VALID_TABLE.match(table):
+        return []
+    return [r[1] for r in con.execute(f'pragma table_info({table})')]
+
+def table_rows(con, table, limit):
+    if not VALID_TABLE.match(table):
+        return []
+    return [dict(r) for r in con.execute(f'select * from {table} limit {int(limit)}')]
+
 def kanban():
     db=os.path.join(home,'kanban.db')
     if not os.path.exists(db): return {'boards': [], 'tasks': [], 'path': db, 'error':'kanban.db not found'}
@@ -68,13 +87,12 @@ def kanban():
     tables=[r[0] for r in con.execute("select name from sqlite_master where type='table'")]
     result={'path':db,'tables':tables,'boards':[],'tasks':[]}
     for t in tables:
-        cols=[r[1] for r in con.execute(f'pragma table_info({t})')]
+        cols=table_columns(con, t)
         if any(c in cols for c in ['title','name']) and any(c in cols for c in ['status','state','column_id','board_id']):
-            try:
-                result['tasks'] += [dict(r) for r in con.execute(f'select * from {t} limit 500')]
+            try: result['tasks'] += table_rows(con, t, 500)
             except Exception: pass
         elif 'board' in t.lower():
-            try: result['boards'] += [dict(r) for r in con.execute(f'select * from {t} limit 100')]
+            try: result['boards'] += table_rows(con, t, 100)
             except Exception: pass
     con.close(); return result
 
@@ -84,12 +102,27 @@ def usage():
     return {'session_files':len(files),'bytes':total,'hermes_home':home,'recent':files[:20]}
 
 def overview():
-    return {'host':os.uname().nodename,'user':os.environ.get('USER',''),'hermes_home':home,'python':sys.version.split()[0],'has_hermes': subprocess.run('command -v hermes',shell=True,stdout=subprocess.PIPE).stdout.decode().strip()}
+    return {'host':os.uname().nodename,'user':os.environ.get('USER',''),'hermes_home':home,'python':sys.version.split()[0],'has_hermes': shutil.which('hermes') or ''}
 
 def read_path(path): return {'path': path, 'content': safe_read(path, 1000000)}
+
 def write_path(path, content):
-    pathlib.Path(os.path.expanduser(path)).write_text(content, encoding='utf-8')
-    return {'saved': path}
+    encoded = content.encode('utf-8')
+    if len(encoded) > 10 * 1024 * 1024:
+        raise ValueError('refusing to write files larger than 10MB')
+    target = os.path.realpath(os.path.expanduser(path))
+    if not (target == home_real or target.startswith(home_real + os.sep)):
+        raise PermissionError('writes are limited to HERMES_HOME')
+    directory = os.path.dirname(target)
+    fd, tmp = tempfile.mkstemp(prefix='.hermes-desktop-', suffix='.tmp', dir=directory, text=True)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(content)
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return {'saved': target}
 
 action=os.environ.get('HD_ACTION','overview')
 arg=os.environ.get('HD_ARG','')
@@ -116,16 +149,19 @@ class SSHClient:
 
     def run_action(self, action: str, arg: str = "", payload: dict | None = None, timeout: int = 60) -> RemoteResult:
         start = now_ms()
-        env = f"HERMES_HOME={shlex.quote(self.profile.hermes_home)} HD_ACTION={shlex.quote(action)} HD_ARG={shlex.quote(arg)} HD_PAYLOAD={shlex.quote(json.dumps(payload or {}))}"
-        script = shlex.quote(REMOTE_SCRIPT)
         if self.profile.host in ("localhost", "127.0.0.1", "::1") and not self.profile.ssh_alias:
-            cmd = f"{env} python3 -c {script}"
+            cmd = ["python3", "-c", REMOTE_SCRIPT]
         else:
             port = [] if self.profile.ssh_alias else ["-p", str(self.profile.port)]
-            remote_cmd = f"{env} python3 -c {script}"
-            cmd = " ".join(["ssh", *map(shlex.quote, port), shlex.quote(self.profile.target), shlex.quote(remote_cmd)])
+            cmd = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", *port, self.profile.target, "python3", "-c", REMOTE_SCRIPT]
+        env = {
+            "HERMES_HOME": self.profile.hermes_home,
+            "HD_ACTION": action,
+            "HD_ARG": arg,
+            "HD_PAYLOAD": json.dumps(payload or {}),
+        }
         try:
-            cp = subprocess.run(cmd, shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+            cp = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env)
             elapsed = now_ms() - start
             if cp.returncode != 0:
                 return RemoteResult(False, error=cp.stderr or cp.stdout, elapsed_ms=elapsed)

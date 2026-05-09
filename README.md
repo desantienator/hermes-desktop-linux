@@ -25,6 +25,12 @@ Requires Tkinter on Linux:
 ```bash
 sudo apt install python3-tk
 cd /home/adrian/projects/hermes-desktop-linux
+python3 -m hermes_desktop_linux
+```
+
+Or, without installing:
+
+```bash
 python3 -m hermes_desktop_linux.app
 ```
 

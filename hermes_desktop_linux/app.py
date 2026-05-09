@@ -74,7 +74,11 @@ class HermesLinuxApp(tk.Tk):
         text = simpledialog.askstring("Profile", "name,host,user,port,hermes_home,ssh_alias", initialvalue=f"{p.name},{p.host},{p.user},{p.port},{p.hermes_home},{p.ssh_alias}")
         if not text: return
         parts = [x.strip() for x in text.split(',', 5)] + [""]*6
-        np = ConnectionProfile(parts[0], parts[1], parts[2], int(parts[3] or 22), parts[4] or "~/.hermes", parts[5])
+        try:
+            np = ConnectionProfile(parts[0], parts[1], parts[2], int(parts[3] or 22), parts[4] or "~/.hermes", parts[5])
+        except ValueError:
+            messagebox.showerror("Invalid profile", "Port must be a number.")
+            return
         self.profiles = [x for x in self.profiles if x.name != p.name] + [np]
         self.store.save(self.profiles); self.profile=np; self.client=SSHClient(np)
         self.profile_combo.config(values=[x.name for x in self.profiles]); self.profile_var.set(np.name); self.refresh()
