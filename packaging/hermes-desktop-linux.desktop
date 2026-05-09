@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Hermes Desktop Linux
+Comment=Native Linux desktop companion for Hermes Agent over SSH
+Exec=hermes-desktop-linux
+Terminal=false
+Categories=Development;Utility;
