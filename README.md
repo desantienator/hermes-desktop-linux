@@ -23,7 +23,7 @@ This is the Linux port of `dodo-reach/hermes-desktop`: same core model, no brows
 
 ```bash
 sudo pacman -Syu
-sudo pacman -S --needed git python python-pyside6 openssh mesa libglvnd
+sudo pacman -S --needed git python pyside6 openssh mesa libglvnd
 
 git clone https://github.com/desantienator/hermes-desktop-linux.git
 cd hermes-desktop-linux
